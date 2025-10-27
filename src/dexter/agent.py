@@ -1,3 +1,4 @@
+import os
 from typing import List
 
 from langchain_core.messages import AIMessage
@@ -182,15 +183,35 @@ class Agent:
                     break
 
                 # Process each tool call returned by the LLM.
+                env_end_date = os.getenv("DEXTER_END_DATE")
                 for tool_call in ai_message.tool_calls:
                     if step_count >= self.max_steps:
                         break
 
                     tool_name = tool_call["name"]
-                    initial_args = tool_call["args"]
-                    
+                    raw_args = tool_call.get("args", {})
+                    initial_args = dict(raw_args) if isinstance(raw_args, dict) else {}
+
+                    tool_to_run = next((t for t in TOOLS if t.name == tool_name), None)
+                    if not tool_to_run:
+                        self.logger._log(f"Invalid tool: {tool_name}")
+                        continue
+
+                    # Determine if the tool supports end_date injection.
+                    end_date_supported = False
+                    if env_end_date and hasattr(tool_to_run, "args_schema") and tool_to_run.args_schema:
+                        schema_fields = getattr(tool_to_run.args_schema, "model_fields", None)
+                        if schema_fields is None:
+                            schema_fields = getattr(tool_to_run.args_schema, "__fields__", {})
+                        end_date_supported = isinstance(schema_fields, dict) and "end_date" in schema_fields
+                        if end_date_supported and "end_date" not in initial_args:
+                            initial_args["end_date"] = env_end_date
+
                     # Refine tool arguments for better performance.
                     optimized_args = self.optimize_tool_args(tool_name, initial_args, task.description)
+
+                    if end_date_supported and isinstance(optimized_args, dict) and "end_date" not in optimized_args:
+                        optimized_args["end_date"] = env_end_date
                     
                     # Create a signature of the action to be taken.
                     action_sig = f"{tool_name}:{optimized_args}"
@@ -204,8 +225,7 @@ class Agent:
                         return
                     
                     # Execute the tool.
-                    tool_to_run = next((t for t in TOOLS if t.name == tool_name), None)
-                    if tool_to_run and self.confirm_action(tool_name, str(optimized_args)):
+                    if self.confirm_action(tool_name, str(optimized_args)):
                         try:
                             result = self._execute_tool(tool_to_run, tool_name, optimized_args)
                             self.logger.log_tool_run(tool_name, f"{result}")
